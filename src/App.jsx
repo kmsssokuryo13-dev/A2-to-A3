@@ -434,7 +434,7 @@ export default function App() {
               <input
                 type="range"
                 min={0.1}
-                max={0.5}
+                max={1}
                 step={0.05}
                 value={previewScale}
                 onChange={(e) => setPreviewScale(Number(e.target.value))}
