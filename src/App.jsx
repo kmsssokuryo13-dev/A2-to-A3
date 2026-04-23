@@ -205,10 +205,18 @@ export default function App() {
     setProgress('自動位置合わせ中…');
     try {
       const a = await autoAlign(current.leftA4, current.rightA4);
-      updateAlign({
-        overlapMm: a.success ? a.overlapMm : DEFAULT_OVERLAP_MM,
-        tyMm: a.success ? a.tyMm : 0,
-        angleDeg: a.success ? a.angleDeg : 0,
+      setPairs((old) => {
+        const next = [...old];
+        next[currentIdx] = {
+          ...next[currentIdx],
+          alignment: {
+            overlapMm: a.success ? a.overlapMm : DEFAULT_OVERLAP_MM,
+            tyMm: a.success ? a.tyMm : 0,
+            angleDeg: a.success ? a.angleDeg : 0,
+          },
+          autoAlign: a,
+        };
+        return next;
       });
     } finally {
       setIsProcessing(false);
