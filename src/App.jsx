@@ -6,9 +6,9 @@ import {
   MAX_ROTATION_DEG,
 } from './constants.js';
 import { loadPdf, renderPageToCanvas, stripExt } from './pdfUtils.js';
-import { rotate90, scaleUniform } from './imageUtils.js';
+import { rotate90, scaleUniform, toColoredOnTransparent } from './imageUtils.js';
 import { autoAlign } from './alignUtils.js';
-import { composePair, getJoinX } from './compose.js';
+import { getJoinX, composePairOverlay } from './compose.js';
 import { exportToPdf } from './pdfExport.js';
 import './App.css';
 
@@ -112,34 +112,66 @@ export default function App() {
   };
 
   // ------------------------------------------------------------- Preview
-  // Re-render the preview canvas whenever alignment / current pair / mono
-  // changes.
+  // Rebuild the colored-on-transparent overlay canvases when the current pair
+  // or threshold changes. Left = black-on-transparent, right = red-on-
+  // transparent. They are drawn with semi-transparent alpha so the overlap
+  // region mixes both colors:
+  //   - aligned overlap  → dark reddish-brown (black+red mix)
+  //   - black-only line  → dark gray (left ghost)
+  //   - red-only line    → light red (right ghost)
+  // Misalignment is immediately obvious as parallel gray/red ghosts near the
+  // join.
+  const [overlays, setOverlays] = useState(null);
   useEffect(() => {
-    if (!current) return;
+    if (!current) {
+      setOverlays(null);
+      return;
+    }
+    const left = toColoredOnTransparent(current.leftA4, monoThreshold, [0, 0, 0]);
+    const right = toColoredOnTransparent(current.rightA4, monoThreshold, [220, 30, 30]);
+    setOverlays({ left, right, pairIdx: currentIdx });
+  }, [current, currentIdx, monoThreshold]);
+
+  useEffect(() => {
+    if (!current || !overlays) return;
     const canvas = previewCanvasRef.current;
     if (!canvas) return;
-    const composite = composePair(current.leftA4, current.rightA4, current.alignment);
+
+    const composite = composePairOverlay(overlays.left, overlays.right, current.alignment);
 
     const scale = previewScale;
     canvas.width = Math.round(composite.width * scale);
     canvas.height = Math.round(composite.height * scale);
     const ctx = canvas.getContext('2d');
+
+    // Checkered background so transparency is visible.
+    const tile = 12;
+    for (let y = 0; y < canvas.height; y += tile) {
+      for (let x = 0; x < canvas.width; x += tile) {
+        const on = ((x / tile) | 0) + ((y / tile) | 0);
+        ctx.fillStyle = on % 2 === 0 ? '#ffffff' : '#e6e9ee';
+        ctx.fillRect(x, y, tile, tile);
+      }
+    }
+
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 0.75;
     ctx.drawImage(composite, 0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 1;
 
-    // Overlay join line (red, semi-transparent)
+    // Faint dashed join guide line so the join X is visible.
     const joinX = getJoinX(current.leftA4, current.alignment) * scale;
     ctx.save();
-    ctx.strokeStyle = 'rgba(220,0,0,0.55)';
+    ctx.strokeStyle = 'rgba(40, 90, 200, 0.45)';
+    ctx.setLineDash([6, 4]);
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(joinX, 0);
     ctx.lineTo(joinX, canvas.height);
     ctx.stroke();
     ctx.restore();
-  }, [current, previewScale, monochrome, monoThreshold]);
+  }, [current, overlays, previewScale]);
 
   // ------------------------------------------------------ Drag-to-scroll
   useEffect(() => {

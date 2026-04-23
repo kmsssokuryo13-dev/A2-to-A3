@@ -52,3 +52,36 @@ export function getJoinX(left, align) {
   const overlapPx = Math.max(0, Math.min(MAX_OVERLAP_MM, align.overlapMm)) * PX_PER_MM;
   return left.width - overlapPx / 2;
 }
+
+/**
+ * Compose left + right halves for preview rendering, keeping transparency.
+ * Inputs are expected to be colored-on-transparent canvases. No white fill
+ * is applied so the underlying checkered background remains visible.
+ */
+export function composePairOverlay(left, right, align) {
+  const overlapPx = Math.max(0, Math.min(MAX_OVERLAP_MM, align.overlapMm)) * PX_PER_MM;
+  const tyPx = align.tyMm * PX_PER_MM;
+  const angleRad = (align.angleDeg * Math.PI) / 180;
+
+  const width = Math.round(left.width + right.width - overlapPx);
+  const height = Math.max(left.height, right.height);
+
+  const out = document.createElement('canvas');
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext('2d');
+
+  // Left fixed at (0, 0)
+  ctx.drawImage(left, 0, 0);
+
+  // Right shifted + rotated around its center
+  const rx = left.width - overlapPx + right.width / 2;
+  const ry = right.height / 2 + tyPx;
+  ctx.save();
+  ctx.translate(rx, ry);
+  ctx.rotate(angleRad);
+  ctx.drawImage(right, -right.width / 2, -right.height / 2);
+  ctx.restore();
+
+  return out;
+}
