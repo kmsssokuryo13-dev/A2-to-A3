@@ -21,17 +21,17 @@ export function rotate90(src, direction) {
 }
 
 /**
- * Scale a source canvas to target pixel width/height using high-quality
- * bilinear scaling (via the browser's built-in image smoothing).
+ * Scale a source canvas uniformly by the given factor (aspect-ratio preserving).
+ * Uses high-quality bilinear scaling.
  */
-export function scaleTo(src, targetW, targetH) {
+export function scaleUniform(src, factor) {
   const out = document.createElement('canvas');
-  out.width = targetW;
-  out.height = targetH;
+  out.width = Math.max(1, Math.round(src.width * factor));
+  out.height = Math.max(1, Math.round(src.height * factor));
   const ctx = out.getContext('2d');
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(src, 0, 0, targetW, targetH);
+  ctx.drawImage(src, 0, 0, out.width, out.height);
   return out;
 }
 

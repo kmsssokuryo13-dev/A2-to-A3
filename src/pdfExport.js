@@ -177,11 +177,11 @@ export async function exportToPdf(pairs, options) {
     const combinedImg = await doc.embedJpg(combinedBytes);
     const p1 = doc.addPage([A3_H_PT, A3_W_PT]); // A3 landscape
     {
-      const box = fitContain(combined.width, combined.height, A3_H_PT, A3_W_PT, 10);
+      const box = fitContain(combined.width, combined.height, A3_H_PT, A3_W_PT, 0);
       p1.drawImage(combinedImg, { x: box.x, y: box.y, width: box.w, height: box.h });
     }
 
-    // ---- Page 2: left half (A3 portrait) with ① ----
+    // ---- Page 2: left half at 1:1 (no size adjustment), with ① ----
     const leftPage = buildSinglePageCanvas(
       pair.leftOriginal,
       '①',
@@ -189,13 +189,16 @@ export async function exportToPdf(pairs, options) {
     );
     const leftBytes = await canvasToJpegBytes(leftPage, quality);
     const leftImg = await doc.embedJpg(leftBytes);
-    const p2 = doc.addPage([A3_W_PT, A3_H_PT]); // A3 portrait
     {
-      const box = fitContain(leftPage.width, leftPage.height, A3_W_PT, A3_H_PT, 10);
-      p2.drawImage(leftImg, { x: box.x, y: box.y, width: box.w, height: box.h });
+      // Page size matches the original scan's PDF point dimensions so the
+      // rendered image is placed 1:1 (aspect ratio preserved, no scaling).
+      const pw = pair.leftOriginalPt?.width ?? A3_W_PT;
+      const ph = pair.leftOriginalPt?.height ?? A3_H_PT;
+      const p2 = doc.addPage([pw, ph]);
+      p2.drawImage(leftImg, { x: 0, y: 0, width: pw, height: ph });
     }
 
-    // ---- Page 3: right half (A3 portrait) with ② ----
+    // ---- Page 3: right half at 1:1 (no size adjustment), with ② ----
     const rightPage = buildSinglePageCanvas(
       pair.rightOriginal,
       '②',
@@ -203,10 +206,11 @@ export async function exportToPdf(pairs, options) {
     );
     const rightBytes = await canvasToJpegBytes(rightPage, quality);
     const rightImg = await doc.embedJpg(rightBytes);
-    const p3 = doc.addPage([A3_W_PT, A3_H_PT]); // A3 portrait
     {
-      const box = fitContain(rightPage.width, rightPage.height, A3_W_PT, A3_H_PT, 10);
-      p3.drawImage(rightImg, { x: box.x, y: box.y, width: box.w, height: box.h });
+      const pw = pair.rightOriginalPt?.width ?? A3_W_PT;
+      const ph = pair.rightOriginalPt?.height ?? A3_H_PT;
+      const p3 = doc.addPage([pw, ph]);
+      p3.drawImage(rightImg, { x: 0, y: 0, width: pw, height: ph });
     }
   }
 
