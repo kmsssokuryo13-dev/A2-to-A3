@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  A4_H_PX,
-  A4_W_PX,
   DEFAULT_OVERLAP_MM,
   DEFAULT_MONO_THRESHOLD,
   MAX_OVERLAP_MM,
   MAX_ROTATION_DEG,
 } from './constants.js';
 import { loadPdf, renderPageToCanvas, stripExt } from './pdfUtils.js';
-import { rotate90, scaleTo } from './imageUtils.js';
+import { rotate90, scaleUniform } from './imageUtils.js';
 import { autoAlign } from './alignUtils.js';
 import { composePair, getJoinX } from './compose.js';
 import { exportToPdf } from './pdfExport.js';
@@ -70,11 +68,11 @@ export default function App() {
         const leftRot = rotate90(leftRaw.canvas, 'ccw');
         const rightRot = rotate90(rightRaw.canvas, 'cw');
 
-        // Scale each rotated image to A4 landscape (height-aware, preserving aspect).
-        // After 90° rotation of an A3 portrait page we get A3 landscape. Scaling
-        // that to A4 landscape halves the area (each dimension × 1/√2).
-        const leftA4 = scaleTo(leftRot, A4_H_PX, A4_W_PX); // width=A4_H (297mm), height=A4_W (210mm)
-        const rightA4 = scaleTo(rightRot, A4_H_PX, A4_W_PX);
+        // "A3→A4 縮小" — halve the area while preserving each source's
+        // aspect ratio (每 dim × 1/√2). Rule: 縦横比は絶対に変えない.
+        const A3_TO_A4 = 1 / Math.SQRT2;
+        const leftA4 = scaleUniform(leftRot, A3_TO_A4);
+        const rightA4 = scaleUniform(rightRot, A3_TO_A4);
 
         // Auto-align
         setProgress(`図面 ${i + 1} / ${pairCount} 自動位置合わせ中…`);
@@ -84,6 +82,8 @@ export default function App() {
           drawingName: pairCount === 1 ? '' : `図面${i + 1}`,
           leftOriginal: leftRaw.canvas,
           rightOriginal: rightRaw.canvas,
+          leftOriginalPt: { width: leftRaw.widthPt, height: leftRaw.heightPt },
+          rightOriginalPt: { width: rightRaw.widthPt, height: rightRaw.heightPt },
           leftA4,
           rightA4,
           alignment: alignment.success
