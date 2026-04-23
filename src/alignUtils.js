@@ -340,16 +340,21 @@ export async function autoAlign(leftCanvas, rightCanvas, _opts = {}) {
   }
 
   // -------- 4) Sub-pixel refinement via parabolic fit ------------------------
+  // `nccScore` returns -1 as a sentinel when the requested overlap drops
+  // below the 2-pixel floor or the vertical overlap is too small. Treat
+  // those samples as "same as peak" so the parabolic fit degenerates to
+  // zero offset instead of being pulled toward the sentinel.
+  const sanitize = (s, s0) => (s < 0 ? s0 : s);
   const subOvPx = (() => {
     const s0 = best.score;
-    const sm = nccScore(Lf, best.Rf, best.overlapPx - 1, best.tyPx, 1);
-    const sp = nccScore(Lf, best.Rf, best.overlapPx + 1, best.tyPx, 1);
+    const sm = sanitize(nccScore(Lf, best.Rf, best.overlapPx - 1, best.tyPx, 1), s0);
+    const sp = sanitize(nccScore(Lf, best.Rf, best.overlapPx + 1, best.tyPx, 1), s0);
     return best.overlapPx + parabolicPeak(sm, s0, sp);
   })();
   const subTyPx = (() => {
     const s0 = best.score;
-    const sm = nccScore(Lf, best.Rf, best.overlapPx, best.tyPx - 1, 1);
-    const sp = nccScore(Lf, best.Rf, best.overlapPx, best.tyPx + 1, 1);
+    const sm = sanitize(nccScore(Lf, best.Rf, best.overlapPx, best.tyPx - 1, 1), s0);
+    const sp = sanitize(nccScore(Lf, best.Rf, best.overlapPx, best.tyPx + 1, 1), s0);
     return best.tyPx + parabolicPeak(sm, s0, sp);
   })();
 
