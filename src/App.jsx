@@ -175,7 +175,9 @@ export default function App() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, []);
+    // The preview scroller is conditionally rendered. Re-run whenever it
+    // mounts/unmounts so the listeners are attached against the actual node.
+  }, [current]);
 
   // ------------------------------------------------------- Alignment edit
   const updateAlign = (patch) => {
