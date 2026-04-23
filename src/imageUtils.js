@@ -63,6 +63,38 @@ export function toMonochrome(src, threshold = 180) {
 }
 
 /**
+ * Convert a canvas to `{ color }` on transparent: pixels whose luminance is
+ * below `threshold` become opaque with the given RGB color, all others become
+ * fully transparent. Used for the preview overlay so that alignment of the
+ * two halves can be visually verified.
+ */
+export function toColoredOnTransparent(src, threshold = 180, rgb = [0, 0, 0]) {
+  const w = src.width;
+  const h = src.height;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  ctx.drawImage(src, 0, 0);
+  const img = ctx.getImageData(0, 0, w, h);
+  const data = img.data;
+  const [r, g, b] = rgb;
+  for (let i = 0; i < data.length; i += 4) {
+    const y = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    if (y < threshold) {
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+      data[i + 3] = 255;
+    } else {
+      data[i + 3] = 0;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+/**
  * Convert canvas -> ArrayBuffer of JPEG bytes.
  */
 export async function canvasToJpegBytes(canvas, quality = 0.85) {
