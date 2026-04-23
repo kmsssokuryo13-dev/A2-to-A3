@@ -133,7 +133,7 @@ export default function App() {
   }, [current, currentIdx, monoThreshold]);
 
   useEffect(() => {
-    if (!current || !overlays) return;
+    if (!current || !overlays || overlays.pairIdx !== currentIdx) return;
     const canvas = previewCanvasRef.current;
     if (!canvas) return;
 
