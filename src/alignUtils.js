@@ -8,15 +8,23 @@
  *   - angleDeg: fine rotation of right image (-2..+2 degrees)
  *
  * Strategy:
- *   1. Build a binarised edge mask (ink vs paper) at two resolutions.
- *   2. Coarse search at 1/4 resolution across {angle, overlap, ty}.
- *   3. Refine angle at 0.1° step around the best coarse angle.
- *   4. Refine translation at 1/2 resolution around the coarse peak.
- *   5. Sub-pixel parabolic fit on (ty, overlap) for the final peak.
+ *   1. Build a binarised edge mask (ink vs paper) at coarse and fine scales.
+ *   2. Coarse search at 1/4 resolution across {angle, overlap, ty}, keeping
+ *      the top-K distinct candidates (not just the global max — the coarse
+ *      grid can snap to a slightly off peak).
+ *   3. Refine each candidate: first at coarse scale with 0.1° angle step,
+ *      then at fine (1/2) scale with 1-pixel (≈0.23 mm) translation step.
+ *   4. Pick the candidate with the best fine-scale score.
+ *   5. Sub-pixel parabolic fit on (ty, overlap) at fine scale.
  *
- * The score is a normalised cross-correlation over the overlap strip
- * computed on the binarised edge mask so that "ink aligns with ink" is what
- * drives the peak, not bulk grayscale variation.
+ * Notes:
+ * - The score is a normalised cross-correlation on a binarised edge mask, so
+ *   empty paper margins no longer dominate.
+ * - Minimum overlap is 0 mm (previously 8 mm). Some scans have essentially
+ *   no physical overlap and the old lower bound forced a spurious overlap.
+ * - Small rotations are mildly penalised so that the algorithm does not
+ *   chase a 0.5° rotation that only wins by a few parts in 1000 — on
+ *   digital PDFs the true angle is usually exactly 0.
  */
 
 import {
@@ -26,8 +34,16 @@ import {
   PX_PER_MM,
 } from './constants.js';
 
-const COARSE_SCALE = 0.25; // 4x smaller
-const FINE_SCALE = 0.5; // 2x smaller
+const COARSE_SCALE = 0.25;
+const FINE_SCALE = 0.5;
+// Number of distinct (angle, overlap, ty) peaks to keep from the coarse pass
+// and refine individually at fine scale. Helps escape shallow local maxima
+// caused by the coarse grid.
+const TOP_K_COARSE = 6;
+// Penalty applied to |angleDeg| when comparing candidates. 0.001 / degree is
+// roughly the noise floor of NCC; this keeps us from preferring a 0.5°
+// rotation that only improves the score by < 0.0005.
+const ANGLE_PENALTY_PER_DEG = 0.004;
 
 // -----------------------------------------------------------------------------
 // Grayscale + gradient helpers
@@ -54,9 +70,6 @@ function canvasToGray(canvas, scale) {
   return { gray, width: w, height: h };
 }
 
-/**
- * Sobel-ish gradient magnitude, normalized to 0..1.
- */
 function gradientMagnitude({ gray, width, height }) {
   const out = new Float32Array(width * height);
   for (let y = 1; y < height - 1; y++) {
@@ -80,21 +93,20 @@ function gradientMagnitude({ gray, width, height }) {
   return { gray: out, width, height };
 }
 
-/**
- * Binarise an already-normalised gradient map.
- * Values above `threshold` become 1; others become 0. This focuses the NCC on
- * ink vs paper rather than on bulk grayscale contrast, so large empty margins
- * no longer dominate the score.
- */
 function binarise({ gray, width, height }, threshold = 0.15) {
   const out = new Float32Array(gray.length);
   for (let i = 0; i < gray.length; i++) out[i] = gray[i] > threshold ? 1 : 0;
   return { gray: out, width, height };
 }
 
+function makeFeatureMap(canvas, scale) {
+  const gray = canvasToGray(canvas, scale);
+  const grad = gradientMagnitude(gray);
+  return binarise(grad, 0.15);
+}
+
 // -----------------------------------------------------------------------------
-// Image rotation on Float32 gray maps (for the right image).
-// Uses bilinear interpolation. Angle in degrees; positive = CCW.
+// Image rotation on Float32 gray maps.
 // -----------------------------------------------------------------------------
 
 function rotateGray({ gray, width, height }, angleDeg) {
@@ -140,10 +152,10 @@ function nccScore(L, R, overlapPx, tyPx, step = 2) {
   const { gray: rg, width: rw, height: rh } = R;
   const overlap = Math.round(overlapPx);
   const ty = Math.round(tyPx);
+  if (overlap < 2) return -1;
 
   const lxStart = lw - overlap;
   const rxStart = 0;
-
   const yStart = Math.max(0, -ty);
   const yEnd = Math.min(lh, rh - ty);
   if (yEnd - yStart < 10) return -1;
@@ -182,19 +194,35 @@ function nccScore(L, R, overlapPx, tyPx, step = 2) {
   return cov / denom;
 }
 
-// -----------------------------------------------------------------------------
-// Build the feature map used for matching at a given canvas scale.
-// -----------------------------------------------------------------------------
-
-function makeFeatureMap(canvas, scale) {
-  const gray = canvasToGray(canvas, scale);
-  const grad = gradientMagnitude(gray);
-  return binarise(grad, 0.15);
+function penalisedScore(score, angleDeg) {
+  return score - ANGLE_PENALTY_PER_DEG * Math.abs(angleDeg);
 }
 
 // -----------------------------------------------------------------------------
-// Parabolic sub-pixel fit: given three samples f(-1), f(0), f(1), return the
-// peak offset in [-1, 1].
+// Top-K insertion with de-duplication by (angle, overlap neighbourhood).
+// -----------------------------------------------------------------------------
+
+function insertTopK(topK, candidate, k, ovTol, tyTol) {
+  // Drop any existing candidate that is too close to the new one: the new
+  // one replaces it if it scores higher.
+  for (let i = 0; i < topK.length; i++) {
+    const c = topK[i];
+    if (
+      c.angleDeg === candidate.angleDeg &&
+      Math.abs(c.overlapPx - candidate.overlapPx) <= ovTol &&
+      Math.abs(c.tyPx - candidate.tyPx) <= tyTol
+    ) {
+      if (candidate.penScore > c.penScore) topK[i] = candidate;
+      return;
+    }
+  }
+  topK.push(candidate);
+  topK.sort((a, b) => b.penScore - a.penScore);
+  if (topK.length > k) topK.length = k;
+}
+
+// -----------------------------------------------------------------------------
+// Parabolic sub-pixel fit.
 // -----------------------------------------------------------------------------
 
 function parabolicPeak(fm1, f0, fp1) {
@@ -219,100 +247,114 @@ export async function autoAlign(leftCanvas, rightCanvas, _opts = {}) {
   for (let a = -MAX_ROTATION_DEG; a <= MAX_ROTATION_DEG + 1e-9; a += 0.5) {
     coarseAngles.push(Math.round(a * 100) / 100);
   }
-  const cMinOv = Math.max(2, 8 * cPx);
+  const cMinOv = 2; // allow overlap from 0 mm upward (2px is the NCC floor)
   const cMaxOv = MAX_OVERLAP_MM * cPx;
-  const cOvStep = Math.max(1, Math.round(2 * cPx));
-  const cMaxTy = Math.round(25 * cPx);
+  const cOvStep = Math.max(1, Math.round(2 * cPx)); // ≈ 2 mm
+  const cMaxTy = Math.round(25 * cPx); // ±25 mm search
   const cTyStep = Math.max(1, Math.round(2 * cPx));
 
-  let coarseBest = {
-    score: -Infinity,
-    overlapPx: DEFAULT_OVERLAP_MM * cPx,
-    tyPx: 0,
-    angleDeg: 0,
-  };
+  const topK = [];
+  const ovDedup = Math.max(1, Math.round(3 * cPx)); // dedup within ~3 mm
+  const tyDedup = Math.max(1, Math.round(3 * cPx));
+
   for (const ang of coarseAngles) {
     const Rr = rotateGray(Rc, ang);
     for (let ov = cMinOv; ov <= cMaxOv; ov += cOvStep) {
       for (let ty = -cMaxTy; ty <= cMaxTy; ty += cTyStep) {
         const s = nccScore(Lc, Rr, ov, ty, 2);
-        if (s > coarseBest.score) {
-          coarseBest = { score: s, overlapPx: ov, tyPx: ty, angleDeg: ang };
-        }
+        if (s <= 0) continue;
+        const pen = penalisedScore(s, ang);
+        insertTopK(
+          topK,
+          { score: s, penScore: pen, overlapPx: ov, tyPx: ty, angleDeg: ang },
+          TOP_K_COARSE,
+          ovDedup,
+          tyDedup,
+        );
       }
     }
   }
 
-  // Convert coarse translation into mm so we can reuse it at the finer scale.
-  const coarseOverlapMm = coarseBest.overlapPx / cPx;
-  const coarseTyMm = coarseBest.tyPx / cPx;
-
-  // -------- 2) Angle refinement at COARSE_SCALE (0.1° step) ------------------
-  let bestAngleDeg = coarseBest.angleDeg;
-  {
-    const angleStep = 0.1;
-    const lo = Math.max(-MAX_ROTATION_DEG, coarseBest.angleDeg - 0.5);
-    const hi = Math.min(MAX_ROTATION_DEG, coarseBest.angleDeg + 0.5);
-    let bestScore = -Infinity;
-    const ovPx = coarseBest.overlapPx;
-    const tyPx = coarseBest.tyPx;
-    for (let a = lo; a <= hi + 1e-9; a += angleStep) {
-      const ang = Math.round(a * 100) / 100;
-      const Rr = rotateGray(Rc, ang);
-      // Evaluate over a tiny 3x3 (ov, ty) neighborhood so the angle choice is
-      // robust to small translation errors from the coarse pass.
-      const range = Math.max(1, Math.round(1 * cPx));
-      let localBest = -Infinity;
-      for (let ov = ovPx - range; ov <= ovPx + range; ov += range || 1) {
-        for (let ty = tyPx - range; ty <= tyPx + range; ty += range || 1) {
-          const s = nccScore(Lc, Rr, ov, ty, 2);
-          if (s > localBest) localBest = s;
-        }
-      }
-      if (localBest > bestScore) {
-        bestScore = localBest;
-        bestAngleDeg = ang;
-      }
-    }
+  if (topK.length === 0) {
+    // Nothing correlated — bail out with a sensible default.
+    return {
+      overlapMm: DEFAULT_OVERLAP_MM,
+      tyMm: 0,
+      angleDeg: 0,
+      score: 0,
+      success: false,
+    };
   }
 
-  // -------- 3) Fine translation search at FINE_SCALE -------------------------
+  // -------- 2) For each coarse candidate, refine angle at 0.1° step ----------
+  const angleRefined = topK.map((c) => refineAngle(Lc, Rc, c, cPx));
+
+  // -------- 3) Refine translation at FINE_SCALE for each candidate -----------
   const fPx = PX_PER_MM * FINE_SCALE;
   const Lf = makeFeatureMap(leftCanvas, FINE_SCALE);
-  const Rf = rotateGray(makeFeatureMap(rightCanvas, FINE_SCALE), bestAngleDeg);
-
-  const ovGuess = Math.round(coarseOverlapMm * fPx);
-  const tyGuess = Math.round(coarseTyMm * fPx);
-  const ovMin = Math.max(2, Math.round(8 * fPx));
+  const RfBase = makeFeatureMap(rightCanvas, FINE_SCALE);
+  const fineRange = Math.max(1, Math.round(4 * fPx)); // ±4 mm fine search
+  const ovMin = 2;
   const ovMax = Math.round(MAX_OVERLAP_MM * fPx);
   const tyMax = Math.round(25 * fPx);
-  const fineRange = Math.max(1, Math.round(3 * fPx));
 
-  let best = {
-    score: -Infinity,
-    overlapPx: ovGuess,
-    tyPx: tyGuess,
-  };
-  for (let ov = ovGuess - fineRange; ov <= ovGuess + fineRange; ov++) {
-    if (ov < ovMin || ov > ovMax) continue;
-    for (let ty = tyGuess - fineRange; ty <= tyGuess + fineRange; ty++) {
-      if (ty < -tyMax || ty > tyMax) continue;
-      const s = nccScore(Lf, Rf, ov, ty, 1);
-      if (s > best.score) best = { score: s, overlapPx: ov, tyPx: ty };
+  let best = null;
+  for (const cand of angleRefined) {
+    const Rf = rotateGray(RfBase, cand.angleDeg);
+    const ovGuess = Math.round((cand.overlapPx / cPx) * fPx);
+    const tyGuess = Math.round((cand.tyPx / cPx) * fPx);
+
+    let localBest = null;
+    for (let ov = ovGuess - fineRange; ov <= ovGuess + fineRange; ov++) {
+      if (ov < ovMin || ov > ovMax) continue;
+      for (let ty = tyGuess - fineRange; ty <= tyGuess + fineRange; ty++) {
+        if (ty < -tyMax || ty > tyMax) continue;
+        const s = nccScore(Lf, Rf, ov, ty, 1);
+        if (s <= 0) continue;
+        const pen = penalisedScore(s, cand.angleDeg);
+        if (!localBest || pen > localBest.penScore) {
+          localBest = {
+            score: s,
+            penScore: pen,
+            overlapPx: ov,
+            tyPx: ty,
+            angleDeg: cand.angleDeg,
+            Rf,
+          };
+        }
+      }
     }
+    if (localBest && (!best || localBest.penScore > best.penScore)) {
+      best = localBest;
+    }
+  }
+
+  if (!best) {
+    return {
+      overlapMm: DEFAULT_OVERLAP_MM,
+      tyMm: 0,
+      angleDeg: 0,
+      score: 0,
+      success: false,
+    };
   }
 
   // -------- 4) Sub-pixel refinement via parabolic fit ------------------------
+  // `nccScore` returns -1 as a sentinel when the requested overlap drops
+  // below the 2-pixel floor or the vertical overlap is too small. Treat
+  // those samples as "same as peak" so the parabolic fit degenerates to
+  // zero offset instead of being pulled toward the sentinel.
+  const sanitize = (s, s0) => (s < 0 ? s0 : s);
   const subOvPx = (() => {
     const s0 = best.score;
-    const sm = nccScore(Lf, Rf, best.overlapPx - 1, best.tyPx, 1);
-    const sp = nccScore(Lf, Rf, best.overlapPx + 1, best.tyPx, 1);
+    const sm = sanitize(nccScore(Lf, best.Rf, best.overlapPx - 1, best.tyPx, 1), s0);
+    const sp = sanitize(nccScore(Lf, best.Rf, best.overlapPx + 1, best.tyPx, 1), s0);
     return best.overlapPx + parabolicPeak(sm, s0, sp);
   })();
   const subTyPx = (() => {
     const s0 = best.score;
-    const sm = nccScore(Lf, Rf, best.overlapPx, best.tyPx - 1, 1);
-    const sp = nccScore(Lf, Rf, best.overlapPx, best.tyPx + 1, 1);
+    const sm = sanitize(nccScore(Lf, best.Rf, best.overlapPx, best.tyPx - 1, 1), s0);
+    const sp = sanitize(nccScore(Lf, best.Rf, best.overlapPx, best.tyPx + 1, 1), s0);
     return best.tyPx + parabolicPeak(sm, s0, sp);
   })();
 
@@ -327,7 +369,7 @@ export async function autoAlign(leftCanvas, rightCanvas, _opts = {}) {
   );
   const angleDeg = Math.max(
     -MAX_ROTATION_DEG,
-    Math.min(MAX_ROTATION_DEG, bestAngleDeg),
+    Math.min(MAX_ROTATION_DEG, best.angleDeg),
   );
 
   return {
@@ -337,4 +379,36 @@ export async function autoAlign(leftCanvas, rightCanvas, _opts = {}) {
     score: best.score,
     success: best.score > 0.2,
   };
+}
+
+/**
+ * Refine the angle of a coarse candidate at 0.1° step around `c.angleDeg`.
+ * Evaluates over a 3×3 (overlap, ty) neighbourhood for robustness.
+ */
+function refineAngle(Lc, Rc, c, cPx) {
+  const angleStep = 0.1;
+  const lo = Math.max(-MAX_ROTATION_DEG, c.angleDeg - 0.5);
+  const hi = Math.min(MAX_ROTATION_DEG, c.angleDeg + 0.5);
+  const nRange = Math.max(1, Math.round(1 * cPx));
+  let bestAngle = c.angleDeg;
+  let bestPen = c.penScore;
+  let bestScore = c.score;
+  for (let a = lo; a <= hi + 1e-9; a += angleStep) {
+    const ang = Math.round(a * 100) / 100;
+    const Rr = rotateGray(Rc, ang);
+    let localBest = -Infinity;
+    for (let ov = c.overlapPx - nRange; ov <= c.overlapPx + nRange; ov += nRange || 1) {
+      for (let ty = c.tyPx - nRange; ty <= c.tyPx + nRange; ty += nRange || 1) {
+        const s = nccScore(Lc, Rr, ov, ty, 2);
+        if (s > localBest) localBest = s;
+      }
+    }
+    const pen = penalisedScore(localBest, ang);
+    if (pen > bestPen) {
+      bestPen = pen;
+      bestAngle = ang;
+      bestScore = localBest;
+    }
+  }
+  return { ...c, angleDeg: bestAngle, penScore: bestPen, score: bestScore };
 }

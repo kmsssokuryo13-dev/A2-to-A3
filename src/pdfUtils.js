@@ -1,5 +1,10 @@
-import * as pdfjsLib from 'pdfjs-dist/build/pdf.mjs';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
+// Use the legacy build: it bundles polyfills (Uint8Array.prototype.toHex/
+// toBase64 etc.) that the main build expects the runtime to provide. Some
+// current Chromium/Safari/Firefox still lack those TC39 proposals, which
+// causes "hashOriginal.toHex is not a function" on PDF fingerprinting. The
+// legacy build is a drop-in replacement with the same API.
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import pdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
