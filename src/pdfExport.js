@@ -8,6 +8,7 @@ import {
 } from './constants.js';
 import {
   canvasToJpegBytes,
+  rotate90,
   toMonochrome,
 } from './imageUtils.js';
 import { composePair, getJoinX } from './compose.js';
@@ -90,14 +91,14 @@ function buildCombinedPageCanvas(pair, { monochrome, monoThreshold }) {
 }
 
 function drawStamp(ctx, cx, cy, diam, label) {
+  // The circle interior is left transparent so the underlying drawing is not
+  // obscured. Only the circular outline and the number glyph are drawn.
   const r = diam / 2;
   ctx.save();
   ctx.lineWidth = Math.max(1, diam * 0.06);
   ctx.strokeStyle = '#111';
-  ctx.fillStyle = '#fff';
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
   ctx.stroke();
   ctx.fillStyle = '#111';
   ctx.font = `bold ${Math.round(diam * 0.7)}px "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif`;
@@ -181,34 +182,39 @@ export async function exportToPdf(pairs, options) {
       p1.drawImage(combinedImg, { x: box.x, y: box.y, width: box.w, height: box.h });
     }
 
-    // ---- Page 2: left half at 1:1 (no size adjustment), with ① ----
+    // ---- Page 2: left half rotated 90° CCW, with ① ----
+    const leftRotated = rotate90(pair.leftOriginal, 'ccw');
     const leftPage = buildSinglePageCanvas(
-      pair.leftOriginal,
+      leftRotated,
       '①',
       { monochrome, monoThreshold },
     );
     const leftBytes = await canvasToJpegBytes(leftPage, quality);
     const leftImg = await doc.embedJpg(leftBytes);
     {
-      // Page size matches the original scan's PDF point dimensions so the
-      // rendered image is placed 1:1 (aspect ratio preserved, no scaling).
-      const pw = pair.leftOriginalPt?.width ?? A3_W_PT;
-      const ph = pair.leftOriginalPt?.height ?? A3_H_PT;
+      // After a 90° rotation the source's width/height pt dimensions swap.
+      const srcW = pair.leftOriginalPt?.width ?? A3_W_PT;
+      const srcH = pair.leftOriginalPt?.height ?? A3_H_PT;
+      const pw = srcH;
+      const ph = srcW;
       const p2 = doc.addPage([pw, ph]);
       p2.drawImage(leftImg, { x: 0, y: 0, width: pw, height: ph });
     }
 
-    // ---- Page 3: right half at 1:1 (no size adjustment), with ② ----
+    // ---- Page 3: right half rotated 90° CW, with ② ----
+    const rightRotated = rotate90(pair.rightOriginal, 'cw');
     const rightPage = buildSinglePageCanvas(
-      pair.rightOriginal,
+      rightRotated,
       '②',
       { monochrome, monoThreshold },
     );
     const rightBytes = await canvasToJpegBytes(rightPage, quality);
     const rightImg = await doc.embedJpg(rightBytes);
     {
-      const pw = pair.rightOriginalPt?.width ?? A3_W_PT;
-      const ph = pair.rightOriginalPt?.height ?? A3_H_PT;
+      const srcW = pair.rightOriginalPt?.width ?? A3_W_PT;
+      const srcH = pair.rightOriginalPt?.height ?? A3_H_PT;
+      const pw = srcH;
+      const ph = srcW;
       const p3 = doc.addPage([pw, ph]);
       p3.drawImage(rightImg, { x: 0, y: 0, width: pw, height: ph });
     }

@@ -46,11 +46,13 @@ export function composePair(left, right, align) {
 
 /**
  * Return the x coordinate (in composite pixels) of the join line.
- * The join is the midpoint of the overlap region.
+ * The join is the left edge of the right half after it has been placed, i.e.
+ *   leftWidth - overlap
+ * so that the red guide line coincides with the start of the right PDF.
  */
 export function getJoinX(left, align) {
   const overlapPx = Math.max(0, Math.min(MAX_OVERLAP_MM, align.overlapMm)) * PX_PER_MM;
-  return left.width - overlapPx / 2;
+  return left.width - overlapPx;
 }
 
 /**
