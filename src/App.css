@@ -197,11 +197,6 @@
 .preview:active {
   cursor: grabbing;
 }
-.preview:focus,
-.preview:focus-visible {
-  outline: 2px solid #3070d0;
-  outline-offset: -2px;
-}
 
 .hint {
   margin: 6px 2px 0;

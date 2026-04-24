@@ -189,8 +189,6 @@ export default function App() {
       sl = el.scrollLeft;
       st = el.scrollTop;
       el.style.cursor = 'grabbing';
-      // Focus so subsequent arrow-key nudges work without an extra click.
-      el.focus({ preventScroll: true });
     };
     const onMove = (e) => {
       if (!isDown) return;
@@ -502,7 +500,6 @@ export default function App() {
           <div
             className="preview"
             ref={scrollerRef}
-            tabIndex={0}
             aria-label="プレビュー（矢印キーで 0.25mm 微調整、Shift+左右で回転）"
           >
             <canvas ref={previewCanvasRef} className="preview-canvas" />
