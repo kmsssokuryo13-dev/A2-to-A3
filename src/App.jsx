@@ -189,6 +189,8 @@ export default function App() {
       sl = el.scrollLeft;
       st = el.scrollTop;
       el.style.cursor = 'grabbing';
+      // Focus so subsequent arrow-key nudges work without an extra click.
+      el.focus({ preventScroll: true });
     };
     const onMove = (e) => {
       if (!isDown) return;
@@ -210,6 +212,49 @@ export default function App() {
     // The preview scroller is conditionally rendered. Re-run whenever it
     // mounts/unmounts so the listeners are attached against the actual node.
   }, [current]);
+
+  // ---------------------------------------- Keyboard nudge in preview
+  // When the preview scroller has focus, arrow keys nudge the right half by
+  // NUDGE_MM. Shift + Left/Right rotates by NUDGE_DEG.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const NUDGE_MM = 0.25;
+    const NUDGE_DEG = 0.1;
+    const onKeyDown = (e) => {
+      const k = e.key;
+      if (k !== 'ArrowUp' && k !== 'ArrowDown' && k !== 'ArrowLeft' && k !== 'ArrowRight') {
+        return;
+      }
+      e.preventDefault();
+      setPairs((old) => {
+        const pair = old[currentIdx];
+        if (!pair) return old;
+        let { overlapMm, tyMm, angleDeg } = pair.alignment;
+        if (e.shiftKey && (k === 'ArrowLeft' || k === 'ArrowRight')) {
+          const d = k === 'ArrowRight' ? NUDGE_DEG : -NUDGE_DEG;
+          angleDeg = clamp(angleDeg + d, -MAX_ROTATION_DEG, MAX_ROTATION_DEG);
+        } else if (k === 'ArrowLeft') {
+          // Right half moves left = more overlap.
+          overlapMm = clamp(overlapMm + NUDGE_MM, 0, MAX_OVERLAP_MM);
+        } else if (k === 'ArrowRight') {
+          overlapMm = clamp(overlapMm - NUDGE_MM, 0, MAX_OVERLAP_MM);
+        } else if (k === 'ArrowUp') {
+          tyMm = clamp(tyMm - NUDGE_MM, -MAX_OVERLAP_MM, MAX_OVERLAP_MM);
+        } else if (k === 'ArrowDown') {
+          tyMm = clamp(tyMm + NUDGE_MM, -MAX_OVERLAP_MM, MAX_OVERLAP_MM);
+        }
+        const next = [...old];
+        next[currentIdx] = {
+          ...pair,
+          alignment: { overlapMm, tyMm, angleDeg },
+        };
+        return next;
+      });
+    };
+    el.addEventListener('keydown', onKeyDown);
+    return () => el.removeEventListener('keydown', onKeyDown);
+  }, [current, currentIdx]);
 
   // ------------------------------------------------------- Alignment edit
   const updateAlign = (patch) => {
@@ -443,9 +488,17 @@ export default function App() {
             </label>
           </div>
 
-          <div className="preview" ref={scrollerRef}>
+          <div
+            className="preview"
+            ref={scrollerRef}
+            tabIndex={0}
+            aria-label="プレビュー（矢印キーで 0.25mm 微調整、Shift+左右で回転）"
+          >
             <canvas ref={previewCanvasRef} className="preview-canvas" />
           </div>
+          <p className="hint">
+            プレビューをクリックしてフォーカスすると、矢印キーで 0.25mm 単位で上下左右を微調整、Shift+左右で回転できます。
+          </p>
 
           {current.autoAlign && (
             <div className="align-info">
