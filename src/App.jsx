@@ -214,16 +214,27 @@ export default function App() {
   }, [current]);
 
   // ---------------------------------------- Keyboard nudge in preview
-  // When the preview scroller has focus, arrow keys nudge the right half by
-  // NUDGE_MM. Shift + Left/Right rotates by NUDGE_DEG.
+  // While a pair is shown, arrow keys nudge the right half by NUDGE_MM and
+  // Shift + Left/Right rotates by NUDGE_DEG. We listen at the window level so
+  // the preview doesn't need to be explicitly focused, but we ignore keys
+  // while the user is typing in a form input.
   useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
+    if (!current) return;
     const NUDGE_MM = 0.25;
     const NUDGE_DEG = 0.1;
     const onKeyDown = (e) => {
       const k = e.key;
       if (k !== 'ArrowUp' && k !== 'ArrowDown' && k !== 'ArrowLeft' && k !== 'ArrowRight') {
+        return;
+      }
+      const ae = document.activeElement;
+      if (
+        ae &&
+        (ae.tagName === 'INPUT' ||
+          ae.tagName === 'TEXTAREA' ||
+          ae.tagName === 'SELECT' ||
+          ae.isContentEditable)
+      ) {
         return;
       }
       e.preventDefault();
@@ -252,8 +263,8 @@ export default function App() {
         return next;
       });
     };
-    el.addEventListener('keydown', onKeyDown);
-    return () => el.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, [current, currentIdx]);
 
   // ------------------------------------------------------- Alignment edit
@@ -497,7 +508,7 @@ export default function App() {
             <canvas ref={previewCanvasRef} className="preview-canvas" />
           </div>
           <p className="hint">
-            プレビューをクリックしてフォーカスすると、矢印キーで 0.25mm 単位で上下左右を微調整、Shift+左右で回転できます。
+            プレビュー表示中は、矢印キーで 0.25mm 単位の上下左右微調整、Shift+左右で 0.1° ずつの回転ができます。（数値入力にフォーカス中は通常通り動作します）
           </p>
 
           {current.autoAlign && (
