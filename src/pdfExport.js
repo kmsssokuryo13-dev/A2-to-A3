@@ -32,7 +32,7 @@ function buildCombinedDrawingCanvas(pair, { monochrome, monoThreshold }) {
 
 /**
  * Build the transparent decorations overlay for the combined page: drawing-name
- * label (with white backdrop), red join line, and ①/② circled-digit stamps.
+ * label (red text, no backdrop), red join line, and ①/② circled-digit stamps.
  * The canvas is the same size as the drawing canvas so it can be drawn as a
  * separate image at the same position in the PDF.
  */
@@ -43,27 +43,17 @@ function buildCombinedDecorationsCanvas(pair, sizeRef) {
   out.height = sizeRef.height;
   const ctx = out.getContext('2d');
 
-  // Drawing name label (top-left, with "全体" suffix). Painted over a white
-  // backdrop so it remains legible regardless of what's underneath.
+  // Drawing name label (top-left, with "全体" suffix). Drawn as red text only —
+  // no white backdrop — so the drawing underneath is not obscured.
   if (drawingName) {
     const label = `${drawingName}全体`;
     const fontSize = Math.max(24, Math.round(out.height * 0.032));
     ctx.font = `bold ${fontSize}px "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif`;
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
-    const metrics = ctx.measureText(label);
-    const padX = fontSize * 0.4;
-    const padY = fontSize * 0.2;
     const bx = Math.round(out.width * 0.015);
     const by = Math.round(out.height * 0.015);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(
-      bx - padX,
-      by - padY,
-      metrics.width + padX * 2,
-      fontSize + padY * 2,
-    );
-    ctx.fillStyle = '#111';
+    ctx.fillStyle = ACCENT_RED;
     ctx.fillText(label, bx, by);
   }
 
