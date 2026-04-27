@@ -1,13 +1,13 @@
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { PDFDocument } from 'pdf-lib';
 import {
   A3_H_PT,
   A3_W_PT,
   COLOR_JPEG_QUALITY,
-  MONO_JPEG_QUALITY,
   DEFAULT_MONO_THRESHOLD,
 } from './constants.js';
 import {
   canvasToJpegBytes,
+  monoCanvasToPngBytes,
   rotate90,
   toMonochrome,
 } from './imageUtils.js';
@@ -167,15 +167,24 @@ export async function exportToPdf(pairs, options) {
     fileBaseName = 'output',
   } = options;
 
-  const quality = monochrome ? MONO_JPEG_QUALITY : COLOR_JPEG_QUALITY;
+  const jpegQuality = COLOR_JPEG_QUALITY;
+  // Embed a canvas as either a 1-bit PNG (for binary monochrome content,
+  // dramatically smaller than JPEG) or a JPEG (for continuous-tone content).
+  const embed = async (canvas) => {
+    if (monochrome) {
+      const bytes = await monoCanvasToPngBytes(canvas);
+      return doc.embedPng(bytes);
+    }
+    const bytes = await canvasToJpegBytes(canvas, jpegQuality);
+    return doc.embedJpg(bytes);
+  };
 
   const doc = await PDFDocument.create();
 
   for (const pair of pairs) {
     // ---- Page 1: combined (A3 landscape) ----
     const combined = buildCombinedPageCanvas(pair, { monochrome, monoThreshold });
-    const combinedBytes = await canvasToJpegBytes(combined, quality);
-    const combinedImg = await doc.embedJpg(combinedBytes);
+    const combinedImg = await embed(combined);
     const p1 = doc.addPage([A3_H_PT, A3_W_PT]); // A3 landscape
     {
       const box = fitContain(combined.width, combined.height, A3_H_PT, A3_W_PT, 0);
@@ -189,8 +198,7 @@ export async function exportToPdf(pairs, options) {
       '①',
       { monochrome, monoThreshold },
     );
-    const leftBytes = await canvasToJpegBytes(leftPage, quality);
-    const leftImg = await doc.embedJpg(leftBytes);
+    const leftImg = await embed(leftPage);
     {
       // After a 90° rotation the source's width/height pt dimensions swap.
       const srcW = pair.leftOriginalPt?.width ?? A3_W_PT;
@@ -208,8 +216,7 @@ export async function exportToPdf(pairs, options) {
       '②',
       { monochrome, monoThreshold },
     );
-    const rightBytes = await canvasToJpegBytes(rightPage, quality);
-    const rightImg = await doc.embedJpg(rightBytes);
+    const rightImg = await embed(rightPage);
     {
       const srcW = pair.rightOriginalPt?.width ?? A3_W_PT;
       const srcH = pair.rightOriginalPt?.height ?? A3_H_PT;
