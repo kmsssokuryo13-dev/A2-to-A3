@@ -32,7 +32,7 @@ function buildCombinedDrawingCanvas(pair, { monochrome, monoThreshold }) {
 
 /**
  * Build the transparent decorations overlay for the combined page: drawing-name
- * label (with white backdrop), red join line, and ①/② circled-digit stamps.
+ * label (red text, no backdrop), red join line, and ①/② circled-digit stamps.
  * The canvas is the same size as the drawing canvas so it can be drawn as a
  * separate image at the same position in the PDF.
  */
