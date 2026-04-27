@@ -199,11 +199,38 @@ export default function App() {
       isDown = false;
       el.style.cursor = 'grab';
     };
+    // Ctrl + wheel zooms the preview around the cursor. Without ctrl, the
+    // event is left alone so the browser scrolls normally.
+    const ZOOM_MIN = 0.1;
+    const ZOOM_MAX = 1;
+    const ZOOM_STEP_PER_PIXEL = 0.0015;
+    const onWheel = (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left + el.scrollLeft;
+      const cy = e.clientY - rect.top + el.scrollTop;
+      setPreviewScale((prev) => {
+        const factor = Math.exp(-e.deltaY * ZOOM_STEP_PER_PIXEL);
+        const next = clamp(prev * factor, ZOOM_MIN, ZOOM_MAX);
+        if (next === prev) return prev;
+        // Keep the point under the cursor stable across the zoom.
+        requestAnimationFrame(() => {
+          if (!el.isConnected) return;
+          const ratio = next / prev;
+          el.scrollLeft = cx * ratio - (e.clientX - rect.left);
+          el.scrollTop = cy * ratio - (e.clientY - rect.top);
+        });
+        return next;
+      });
+    };
     el.addEventListener('mousedown', onDown);
+    el.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => {
       el.removeEventListener('mousedown', onDown);
+      el.removeEventListener('wheel', onWheel);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
@@ -505,7 +532,7 @@ export default function App() {
             <canvas ref={previewCanvasRef} className="preview-canvas" />
           </div>
           <p className="hint">
-            プレビュー表示中は、矢印キーで 0.25mm 単位の上下左右微調整、Shift+左右で 0.1° ずつの回転ができます。（数値入力にフォーカス中は通常通り動作します）
+            プレビュー表示中は、矢印キーで 0.25mm 単位の上下左右微調整、Shift+左右で 0.1° ずつの回転、Ctrl+ホイールでカーソル位置を中心に拡大縮小できます。（数値入力にフォーカス中は通常通り動作します）
           </p>
 
           {current.autoAlign && (
