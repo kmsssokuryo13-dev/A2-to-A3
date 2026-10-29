@@ -34,6 +34,9 @@ export default function App() {
   const [previewScale, setPreviewScale] = useState(0.2);
   const [errorMessage, setErrorMessage] = useState('');
 
+  // Raw bytes of the uploaded PDF. Export embeds the original pages directly
+  // when they are plain 1-bit scans (see pdfExport.js).
+  const sourceBytesRef = useRef(null);
   const previewCanvasRef = useRef(null);
   const scrollerRef = useRef(null);
 
@@ -48,7 +51,10 @@ export default function App() {
     setPairs([]);
     setFileName(stripExt(file.name));
     try {
-      const pdf = await loadPdf(file);
+      const sourceBytes = await file.arrayBuffer();
+      // pdf.js may transfer (detach) the buffer it is given, so hand it a copy.
+      sourceBytesRef.current = sourceBytes;
+      const pdf = await loadPdf(sourceBytes.slice(0));
       const pageCount = pdf.numPages;
       if (pageCount % 2 !== 0) {
         throw new Error(
@@ -80,6 +86,8 @@ export default function App() {
         newPairs.push({
           index: i,
           drawingName: pairCount === 1 ? '' : `図面${i + 1}`,
+          leftPageIndex: leftIdx - 1,
+          rightPageIndex: rightIdx - 1,
           leftOriginal: leftRaw.canvas,
           rightOriginal: rightRaw.canvas,
           leftOriginalPt: { width: leftRaw.widthPt, height: leftRaw.heightPt },
@@ -345,6 +353,7 @@ export default function App() {
       const { bytes, filename } = await exportToPdf(pairs, {
         monochrome,
         monoThreshold,
+        sourceBytes: sourceBytesRef.current,
         fileBaseName: fileName || 'output',
       });
       const blob = new Blob([bytes], { type: 'application/pdf' });

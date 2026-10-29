@@ -12,11 +12,14 @@ import { PX_PER_MM, MAX_OVERLAP_MM } from './constants.js';
  * @param {HTMLCanvasElement} left
  * @param {HTMLCanvasElement} right
  * @param {{overlapMm:number, tyMm:number, angleDeg:number}} align
+ * @param {number} [pxPerMm]  Pixels per alignment-mm of `left`/`right`.
+ *   Defaults to the A4-scaled preview resolution; pass a larger value to
+ *   compose from higher-resolution sources (e.g. the unscaled A3 halves).
  * @returns {HTMLCanvasElement}
  */
-export function composePair(left, right, align) {
-  const overlapPx = Math.max(0, Math.min(MAX_OVERLAP_MM, align.overlapMm)) * PX_PER_MM;
-  const tyPx = align.tyMm * PX_PER_MM;
+export function composePair(left, right, align, pxPerMm = PX_PER_MM) {
+  const overlapPx = Math.max(0, Math.min(MAX_OVERLAP_MM, align.overlapMm)) * pxPerMm;
+  const tyPx = align.tyMm * pxPerMm;
   const angleRad = (align.angleDeg * Math.PI) / 180;
 
   const width = Math.round(left.width + right.width - overlapPx);
@@ -50,8 +53,8 @@ export function composePair(left, right, align) {
  *   leftWidth - overlap
  * so that the red guide line coincides with the start of the right PDF.
  */
-export function getJoinX(left, align) {
-  const overlapPx = Math.max(0, Math.min(MAX_OVERLAP_MM, align.overlapMm)) * PX_PER_MM;
+export function getJoinX(left, align, pxPerMm = PX_PER_MM) {
+  const overlapPx = Math.max(0, Math.min(MAX_OVERLAP_MM, align.overlapMm)) * pxPerMm;
   return left.width - overlapPx;
 }
 
