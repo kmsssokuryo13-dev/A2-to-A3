@@ -363,9 +363,14 @@ export async function autoAlign(leftCanvas, rightCanvas, _opts = {}) {
     MAX_OVERLAP_MM,
     Math.max(0, subOvPx / fPx),
   );
+  // `nccScore` matches left row y against right row y + ty, i.e. the right
+  // half sits `ty` *above* the left one. `composePair` uses the opposite
+  // convention (positive tyMm moves the right half down), so flip the sign.
+  // Without this the right half was always placed mirrored vertically around
+  // the correct position (e.g. -2.0 mm instead of +2.1 mm).
   const tyMm = Math.max(
     -MAX_OVERLAP_MM,
-    Math.min(MAX_OVERLAP_MM, subTyPx / fPx),
+    Math.min(MAX_OVERLAP_MM, -subTyPx / fPx),
   );
   const angleDeg = Math.max(
     -MAX_ROTATION_DEG,

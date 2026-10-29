@@ -1,133 +1,180 @@
-import { PDFDocument } from 'pdf-lib';
+import {
+  PDFDocument,
+  PDFName,
+  concatTransformationMatrix,
+  drawObject,
+  popGraphicsState,
+  pushGraphicsState,
+  rgb,
+} from 'pdf-lib';
 import {
   A3_H_PT,
   A3_W_PT,
   COLOR_JPEG_QUALITY,
   DEFAULT_MONO_THRESHOLD,
+  PX_PER_MM,
 } from './constants.js';
 import {
   canvasToJpegBytes,
   canvasToPngBytes,
-  monoCanvasToPngBytes,
+  monoCanvasToFlateBits,
   rotate90,
   toMonochrome,
 } from './imageUtils.js';
 import { composePair, getJoinX } from './compose.js';
+import {
+  drawCombined,
+  drawSingleHalf,
+  hasColorPixels,
+  isBilevelScanPage,
+} from './pdfPassthrough.js';
 
 // Color of the join line and the ①/② stamps (slightly translucent so the
 // drawing underneath is still visible through the line).
 const ACCENT_RED = 'rgba(220, 0, 0, 0.7)';
+const ACCENT_RED_PDF = { color: rgb(220 / 255, 0, 0), opacity: 0.7 };
 
 /**
  * Build the bare A3-landscape "Page 1" drawing canvas (no decorations baked in).
- * Decorations (label / red join line / ①② stamps) are drawn on a separate
- * transparent overlay so the drawing itself can be encoded as a tiny 1-bit PNG
- * while keeping the colored decorations in full color.
+ * Decorations (label / red join line / ①② stamps) are added separately (see
+ * `buildCombinedDecorations`) so the drawing itself can be encoded as a tiny
+ * 1-bit image while keeping the colored decorations in full color.
+ *
+ * In monochrome mode the halves are composed from the unscaled A3 originals
+ * instead of the A4-scaled preview canvases. The combined page is then ~√2x
+ * sharper (≈310 dpi on A3 instead of ≈155 dpi), which keeps small text
+ * legible; previously the A2→A3 downscale blurred strokes to gray and the
+ * threshold filled in the gaps inside characters. The 1-bit encoding keeps
+ * the extra pixels cheap. Color mode keeps the A4 resolution because its
+ * JPEG size grows with pixel count.
+ *
+ * Returns `{ canvas, pxPerMm }` where `pxPerMm` is the canvas resolution in
+ * alignment-mm (needed to place the join line).
  */
 function buildCombinedDrawingCanvas(pair, { monochrome, monoThreshold }) {
   const { leftA4, rightA4, alignment } = pair;
-  const composite = composePair(leftA4, rightA4, alignment);
-  return monochrome ? toMonochrome(composite, monoThreshold) : composite;
+  if (!monochrome) {
+    return { canvas: composePair(leftA4, rightA4, alignment), pxPerMm: PX_PER_MM };
+  }
+  const left = rotate90(pair.leftOriginal, 'ccw');
+  const right = rotate90(pair.rightOriginal, 'cw');
+  // Exact ratio between the original and the A4-scaled canvas (≈√2).
+  const pxPerMm = PX_PER_MM * (left.width / leftA4.width);
+  const composite = composePair(left, right, alignment, pxPerMm);
+  return { canvas: toMonochrome(composite, monoThreshold), pxPerMm };
 }
 
 /**
- * Build the transparent decorations overlay for the combined page: drawing-name
- * label (red text, no backdrop), red join line, and ①/② circled-digit stamps.
- * The canvas is the same size as the drawing canvas so it can be drawn as a
- * separate image at the same position in the PDF.
+ * Render `text` into a tight transparent canvas. Returns the canvas plus the
+ * offset of the text's anchor point inside it, so callers can position it.
  */
-function buildCombinedDecorationsCanvas(pair, sizeRef) {
-  const { leftA4, alignment, drawingName } = pair;
+function renderTextCanvas(text, font, anchor) {
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = font;
+  // Bounding-box metrics are relative to the anchor, so measure with the
+  // same alignment the text is drawn with.
+  measure.textAlign = anchor.textAlign;
+  measure.textBaseline = anchor.textBaseline;
+  const m = measure.measureText(text);
+  const left = Math.ceil(m.actualBoundingBoxLeft ?? 0) + 2;
+  const right = Math.ceil(m.actualBoundingBoxRight ?? m.width) + 2;
+  const ascent = Math.ceil(m.actualBoundingBoxAscent ?? 0) + 2;
+  const descent = Math.ceil(m.actualBoundingBoxDescent ?? 0) + 2;
   const out = document.createElement('canvas');
-  out.width = sizeRef.width;
-  out.height = sizeRef.height;
+  out.width = Math.max(1, left + right);
+  out.height = Math.max(1, ascent + descent);
   const ctx = out.getContext('2d');
+  ctx.font = font;
+  ctx.textAlign = anchor.textAlign;
+  ctx.textBaseline = anchor.textBaseline;
+  ctx.fillStyle = ACCENT_RED;
+  ctx.fillText(text, left, ascent);
+  return { canvas: out, anchorX: left, anchorY: ascent };
+}
 
-  // Drawing name label (top-left, with "全体" suffix). Drawn as red text only —
-  // no white backdrop — so the drawing underneath is not obscured.
+/**
+ * Draw `text` so that its anchor point is at (x, y) in drawing pixels.
+ * Returns a decoration item `{ canvas, x, y }` (top-left in drawing pixels).
+ */
+function textItem(text, font, x, y, anchor) {
+  const t = renderTextCanvas(text, font, anchor);
+  return { canvas: t.canvas, x: x - t.anchorX, y: y - t.anchorY };
+}
+
+/**
+ * A circled-digit (e.g. ①, ②) glyph centered at (cx, cy). The Unicode
+ * character itself includes the surrounding circle, so we draw only the glyph.
+ * The glyph fills almost the full diameter; use a font slightly larger than
+ * the bounding box so the circle reads as the same size as before.
+ */
+function circledDigitItem(cx, cy, diam, label) {
+  const font = `${Math.round(diam * 1.15)}px "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif`;
+  return textItem(label, font, cx, cy, { textAlign: 'center', textBaseline: 'middle' });
+}
+
+/**
+ * Decorations for the combined page: drawing-name label (red text, no
+ * backdrop), red join line, and ①/② circled-digit stamps. Text items are
+ * small, tightly cropped images; the join line is drawn as a PDF vector line.
+ * Previously all decorations were one full-page RGBA image, which cost
+ * ~60 KB per page even though it was almost entirely transparent.
+ */
+function buildCombinedDecorations(pair, size, pxPerMm) {
+  const { leftA4, alignment, drawingName } = pair;
+  const items = [];
+
+  // Drawing name label (top-left, with "全体" suffix).
   if (drawingName) {
-    const label = `${drawingName}全体`;
-    const fontSize = Math.max(24, Math.round(out.height * 0.032));
-    ctx.font = `bold ${fontSize}px "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif`;
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
-    const bx = Math.round(out.width * 0.015);
-    const by = Math.round(out.height * 0.015);
-    ctx.fillStyle = ACCENT_RED;
-    ctx.fillText(label, bx, by);
+    const fontSize = Math.max(24, Math.round(size.height * 0.032));
+    const font = `bold ${fontSize}px "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif`;
+    items.push(
+      textItem(
+        `${drawingName}全体`,
+        font,
+        Math.round(size.width * 0.015),
+        Math.round(size.height * 0.015),
+        { textAlign: 'left', textBaseline: 'top' },
+      ),
+    );
   }
 
   // Red join line at the right-half's left edge.
-  const joinX = getJoinX(leftA4, alignment);
-  ctx.save();
-  ctx.strokeStyle = ACCENT_RED;
-  ctx.lineWidth = Math.max(0.8, out.height * 0.0008);
-  ctx.beginPath();
-  ctx.moveTo(joinX, 0);
-  ctx.lineTo(joinX, out.height);
-  ctx.stroke();
-  ctx.restore();
+  const joinX = getJoinX(leftA4, alignment) * (pxPerMm / PX_PER_MM);
+  const line = { x: joinX, width: Math.max(0.8, size.height * 0.0008) };
 
-  // ①/② stamps — bottom-left of each half. The Unicode characters already
-  // include their own circle, so no outer ring is drawn (was double-circled).
-  const stampDiam = Math.round(out.height * 0.05);
-  drawCircledDigit(
-    ctx,
-    Math.round(out.width * 0.02) + stampDiam / 2,
-    out.height - Math.round(out.height * 0.03) - stampDiam / 2,
-    stampDiam,
-    '①',
-  );
-  drawCircledDigit(
-    ctx,
-    Math.round(joinX + out.width * 0.012) + stampDiam / 2,
-    out.height - Math.round(out.height * 0.03) - stampDiam / 2,
-    stampDiam,
-    '②',
+  // ①/② stamps — bottom-left of each half.
+  const stampDiam = Math.round(size.height * 0.05);
+  const stampY = size.height - Math.round(size.height * 0.03) - stampDiam / 2;
+  items.push(
+    circledDigitItem(Math.round(size.width * 0.02) + stampDiam / 2, stampY, stampDiam, '①'),
+    circledDigitItem(Math.round(joinX + size.width * 0.012) + stampDiam / 2, stampY, stampDiam, '②'),
   );
 
-  return out;
-}
-
-/**
- * Draw a circled-digit (e.g. ①, ②) glyph centered at (cx, cy). The Unicode
- * character itself includes the surrounding circle, so we draw only the glyph.
- */
-function drawCircledDigit(ctx, cx, cy, diam, label) {
-  ctx.save();
-  ctx.fillStyle = ACCENT_RED;
-  // The glyph fills almost the full diameter; use a font slightly larger than
-  // the bounding box so the circle reads as the same size as before.
-  ctx.font = `${Math.round(diam * 1.15)}px "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(label, cx, cy);
-  ctx.restore();
+  return { items, line };
 }
 
 /**
  * Build the bare single-page drawing canvas (the original half-scan,
- * optionally monochromized). The single ①/② stamp is drawn on a separate
- * decorations overlay (see `buildSinglePageDecorationsCanvas`).
+ * optionally monochromized). The single ①/② stamp is added separately (see
+ * `buildSinglePageDecorations`).
  */
 function buildSinglePageDrawingCanvas(sourceCanvas, { monochrome, monoThreshold }) {
   return monochrome ? toMonochrome(sourceCanvas, monoThreshold) : sourceCanvas;
 }
 
-function buildSinglePageDecorationsCanvas(stampLabel, sizeRef) {
-  const out = document.createElement('canvas');
-  out.width = sizeRef.width;
-  out.height = sizeRef.height;
-  const ctx = out.getContext('2d');
-  const stampDiam = Math.round(Math.min(out.width, out.height) * 0.04);
-  drawCircledDigit(
-    ctx,
-    Math.round(out.width * 0.03) + stampDiam / 2,
-    out.height - Math.round(out.height * 0.03) - stampDiam / 2,
-    stampDiam,
-    stampLabel,
-  );
-  return out;
+function buildSinglePageDecorations(stampLabel, size) {
+  const stampDiam = Math.round(Math.min(size.width, size.height) * 0.04);
+  return {
+    items: [
+      circledDigitItem(
+        Math.round(size.width * 0.03) + stampDiam / 2,
+        size.height - Math.round(size.height * 0.03) - stampDiam / 2,
+        stampDiam,
+        stampLabel,
+      ),
+    ],
+    line: null,
+  };
 }
 
 /**
@@ -161,71 +208,136 @@ export async function exportToPdf(pairs, options) {
   const {
     monochrome = true,
     monoThreshold = DEFAULT_MONO_THRESHOLD,
+    sourceBytes = null,
     fileBaseName = 'output',
   } = options;
 
   const doc = await PDFDocument.create();
 
-  // Embed the bare drawing as either a 1-bit grayscale PNG (binary monochrome
-  // content compresses dramatically smaller than JPEG) or a JPEG (continuous-
-  // tone). Decorations always go through `embedDecorations` as RGBA PNG.
-  const embedDrawing = async (canvas) => {
-    if (monochrome) {
-      const bytes = await monoCanvasToPngBytes(canvas);
-      return doc.embedPng(bytes);
+  // Pages that are already bi-level scans are embedded as-is (see
+  // pdfPassthrough.js); everything else is rasterized below.
+  const srcDoc =
+    monochrome && sourceBytes ? await PDFDocument.load(sourceBytes, { ignoreEncryption: true }) : null;
+  const embeddedPages = new Map();
+  const passthroughHalf = async (pageIndex, side, displayPt) => {
+    if (!embeddedPages.has(pageIndex)) {
+      const srcPage = srcDoc.getPage(pageIndex);
+      const box = srcPage.getCropBox();
+      embeddedPages.set(pageIndex, {
+        embedded: await doc.embedPage(srcPage, {
+          left: box.x,
+          bottom: box.y,
+          right: box.x + box.width,
+          top: box.y + box.height,
+        }),
+        rotation: srcPage.getRotation().angle,
+      });
     }
-    const bytes = await canvasToJpegBytes(canvas, COLOR_JPEG_QUALITY);
-    return doc.embedJpg(bytes);
+    return { ...embeddedPages.get(pageIndex), side, displayPt };
   };
-  const embedDecorations = async (canvas) => {
-    const bytes = await canvasToPngBytes(canvas);
-    return doc.embedPng(bytes);
+  const canPassthrough = (pageIndex, canvas) =>
+    srcDoc != null &&
+    pageIndex != null &&
+    pageIndex < srcDoc.getPageCount() &&
+    isBilevelScanPage(srcDoc.getPage(pageIndex)) &&
+    !hasColorPixels(canvas);
+
+  // Draw the bare drawing filling `box` (page points). Monochrome drawings are
+  // embedded as raw 1-bit DeviceGray image XObjects (Flate); color drawings as
+  // JPEG.
+  const drawDrawing = async (page, canvas, box) => {
+    if (!monochrome) {
+      const img = await doc.embedJpg(await canvasToJpegBytes(canvas, COLOR_JPEG_QUALITY));
+      page.drawImage(img, { x: box.x, y: box.y, width: box.w, height: box.h });
+      return;
+    }
+    const { width, height, bytes } = await monoCanvasToFlateBits(canvas);
+    const ref = doc.context.register(
+      doc.context.stream(bytes, {
+        Type: 'XObject',
+        Subtype: 'Image',
+        Width: width,
+        Height: height,
+        ColorSpace: 'DeviceGray',
+        BitsPerComponent: 1,
+        Filter: 'FlateDecode',
+      }),
+    );
+    const name = page.node.newXObject('Image', ref);
+    page.pushOperators(
+      pushGraphicsState(),
+      concatTransformationMatrix(box.w, 0, 0, box.h, box.x, box.y),
+      drawObject(name),
+      popGraphicsState(),
+    );
+  };
+
+  // Draw decorations over a drawing of `size` (pixels) placed at `box`.
+  const drawDecorations = async (page, { items, line }, size, box) => {
+    const k = box.w / size.width;
+    for (const item of items) {
+      const img = await doc.embedPng(await canvasToPngBytes(item.canvas));
+      const w = item.canvas.width * k;
+      const h = item.canvas.height * k;
+      page.drawImage(img, {
+        x: box.x + item.x * k,
+        y: box.y + box.h - item.y * k - h,
+        width: w,
+        height: h,
+      });
+    }
+    if (line) {
+      const x = box.x + line.x * k;
+      page.drawLine({
+        start: { x, y: box.y },
+        end: { x, y: box.y + box.h },
+        thickness: line.width * k,
+        ...ACCENT_RED_PDF,
+      });
+    }
   };
 
   for (const pair of pairs) {
+    if (
+      canPassthrough(pair.leftPageIndex, pair.leftOriginal) &&
+      canPassthrough(pair.rightPageIndex, pair.rightOriginal)
+    ) {
+      await exportPairPassthrough(doc, pair, {
+        left: await passthroughHalf(pair.leftPageIndex, 'left', pair.leftOriginalPt),
+        right: await passthroughHalf(pair.rightPageIndex, 'right', pair.rightOriginalPt),
+        drawDecorations,
+      });
+      continue;
+    }
+
     // ---- Page 1: combined (A3 landscape) ----
-    const combined = buildCombinedDrawingCanvas(pair, { monochrome, monoThreshold });
-    const combinedDecor = buildCombinedDecorationsCanvas(pair, combined);
-    const combinedImg = await embedDrawing(combined);
-    const combinedDecorImg = await embedDecorations(combinedDecor);
+    const { canvas: combined, pxPerMm } = buildCombinedDrawingCanvas(pair, {
+      monochrome,
+      monoThreshold,
+    });
     const p1 = doc.addPage([A3_H_PT, A3_W_PT]); // A3 landscape
     {
       const box = fitContain(combined.width, combined.height, A3_H_PT, A3_W_PT, 0);
-      p1.drawImage(combinedImg, { x: box.x, y: box.y, width: box.w, height: box.h });
-      p1.drawImage(combinedDecorImg, { x: box.x, y: box.y, width: box.w, height: box.h });
+      await drawDrawing(p1, combined, box);
+      await drawDecorations(p1, buildCombinedDecorations(pair, combined, pxPerMm), combined, box);
     }
 
     // ---- Page 2: left half rotated 90° CCW, with ① ----
-    const leftRotated = rotate90(pair.leftOriginal, 'ccw');
-    const leftDrawing = buildSinglePageDrawingCanvas(leftRotated, { monochrome, monoThreshold });
-    const leftDecor = buildSinglePageDecorationsCanvas('①', leftDrawing);
-    const leftImg = await embedDrawing(leftDrawing);
-    const leftDecorImg = await embedDecorations(leftDecor);
-    {
-      // After a 90° rotation the source's width/height pt dimensions swap.
-      const srcW = pair.leftOriginalPt?.width ?? A3_W_PT;
-      const srcH = pair.leftOriginalPt?.height ?? A3_H_PT;
-      const pw = srcH;
-      const ph = srcW;
-      const p2 = doc.addPage([pw, ph]);
-      p2.drawImage(leftImg, { x: 0, y: 0, width: pw, height: ph });
-      p2.drawImage(leftDecorImg, { x: 0, y: 0, width: pw, height: ph });
-    }
-
     // ---- Page 3: right half rotated 90° CW, with ② ----
-    const rightRotated = rotate90(pair.rightOriginal, 'cw');
-    const rightDrawing = buildSinglePageDrawingCanvas(rightRotated, { monochrome, monoThreshold });
-    const rightDecor = buildSinglePageDecorationsCanvas('②', rightDrawing);
-    const rightImg = await embedDrawing(rightDrawing);
-    const rightDecorImg = await embedDecorations(rightDecor);
-    {
-      const srcW = pair.rightOriginalPt?.width ?? A3_W_PT;
-      const srcH = pair.rightOriginalPt?.height ?? A3_H_PT;
-      const pw = srcH;
-      const ph = srcW;
-      const p3 = doc.addPage([pw, ph]);
-      p3.drawImage(rightImg, { x: 0, y: 0, width: pw, height: ph });
-      p3.drawImage(rightDecorImg, { x: 0, y: 0, width: pw, height: ph });
+    const halves = [
+      { source: pair.leftOriginal, pt: pair.leftOriginalPt, dir: 'ccw', label: '①' },
+      { source: pair.rightOriginal, pt: pair.rightOriginalPt, dir: 'cw', label: '②' },
+    ];
+    for (const half of halves) {
+      const rotated = rotate90(half.source, half.dir);
+      const drawing = buildSinglePageDrawingCanvas(rotated, { monochrome, monoThreshold });
+      // After a 90° rotation the source's width/height pt dimensions swap.
+      const pw = half.pt?.height ?? A3_H_PT;
+      const ph = half.pt?.width ?? A3_W_PT;
+      const page = doc.addPage([pw, ph]);
+      const box = { x: 0, y: 0, w: pw, h: ph };
+      await drawDrawing(page, drawing, box);
+      await drawDecorations(page, buildSinglePageDecorations(half.label, drawing), drawing, box);
     }
   }
 
@@ -234,4 +346,45 @@ export async function exportToPdf(pairs, options) {
     bytes,
     filename: `${fileBaseName}全体.pdf`,
   };
+}
+
+/**
+ * Export one pair by placing the original (bi-level) source pages instead of
+ * re-rasterized canvases. Geometry and decorations match the raster path.
+ */
+async function exportPairPassthrough(doc, pair, { left, right, drawDecorations }) {
+  const { leftA4, rightA4, alignment } = pair;
+
+  // ---- Page 1: combined (A3 landscape) ----
+  // Composite size in A4-scaled pixels, same as composePair().
+  const joinX = getJoinX(leftA4, alignment);
+  const comp = {
+    width: Math.round(joinX + rightA4.width),
+    height: Math.max(leftA4.height, rightA4.height),
+  };
+  const p1 = doc.addPage([A3_H_PT, A3_W_PT]);
+  const box = fitContain(comp.width, comp.height, A3_H_PT, A3_W_PT, 0);
+  drawCombined(p1, pair, left, right, box, comp);
+  await drawDecorations(p1, buildCombinedDecorations(pair, comp, PX_PER_MM), comp, box);
+
+  // ---- Pages 2 and 3: each half upright, with ① / ② ----
+  for (const [half, source, label] of [
+    [left, pair.leftOriginal, '①'],
+    [right, pair.rightOriginal, '②'],
+  ]) {
+    // After a 90° rotation the source's width/height swap.
+    const pw = half.displayPt?.height ?? A3_H_PT;
+    const ph = half.displayPt?.width ?? A3_W_PT;
+    const page = doc.addPage([pw, ph]);
+    drawSingleHalf(page, half);
+    // Decorations are laid out in the 220 dpi raster's pixel space so the
+    // stamp renders at the same size and sharpness as before.
+    const size = { width: source.height, height: source.width };
+    await drawDecorations(page, buildSinglePageDecorations(label, size), size, {
+      x: 0,
+      y: 0,
+      w: pw,
+      h: ph,
+    });
+  }
 }
